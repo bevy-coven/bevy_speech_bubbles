@@ -66,7 +66,7 @@ The GIF above; any `.ttf` works. `dialog_box` shows the screen box with a choice
 
 ## Part of the Coven
 
-`bevy_speech_bubbles` is one of the [Bevy Coven](https://github.com/bevy-coven) crates: [`bevy_society`](https://crates.io/crates/bevy_society)'s villagers speak through it. Grimoire, the Coven's editor, stores barks and conversations with this crate's own types: [use it in Grimoire](https://bevy-coven.github.io/crates/bevy_speech_bubbles.html#use-it-in-grimoire).
+`bevy_speech_bubbles` is one of the [Bevy Coven](https://github.com/bevy-coven) crates: [`bevy_society`](https://crates.io/crates/bevy_society)'s villagers speak through it. The Cauldron, the Coven's editor, stores barks and conversations with this crate's own types: [use it in the Cauldron](https://bevy-coven.github.io/crates/bevy_speech_bubbles.html#use-it-in-the-cauldron).
 
 ## Bevy compatibility
 
