@@ -11,17 +11,19 @@
 //!
 //! The script names speakers with plain strings and the host resolves them through [`Speakers`]: a
 //! speaker with an `entity` gets a world balloon anchored to it, one without is a narrator (no balloon;
-//! the screen dialog box still shows its `name`). The crate knows no game type.
+//! the screen dialog box still shows its `name`). A key that is not in [`Speakers`] at all is the host's
+//! mistake, not a narrator: the crate `warn!`s naming it and skips the line or bark. The crate knows no
+//! game type.
 //!
 //! # Two ways to show a line
 //!
 //! [`Presenter::Balloons`] puts every line over its speaker's head and auto-advances after
-//! [`dwell_secs`](crate::dwell_secs); [`Presenter::DialogBox`] shows the screen box of
+//! [`dwell_secs`]; [`Presenter::DialogBox`] shows the screen box of
 //! [`crate::dialog_box`] and waits for the player. [`Bark`]s are one-off ambient lines and are always
 //! world balloons, whatever the presenter. A modal conversation holds [`ConversationLock`]; hosts that
 //! must yield input or pause the simulation read it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::light::NotShadowCaster;
 use bevy::picking::Pickable;
@@ -54,7 +56,11 @@ pub struct Choice {
 }
 
 /// A single node in a conversation graph.
+///
+/// Authored data: a key the node does not have (a misspelt `emotion`, a `kind` on a choice) is a parse
+/// error naming the key, never a field silently left at its default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Node {
     /// A spoken/thought line by `speaker`; advances to `next` (or ends the conversation on `None`).
     Line {
@@ -133,7 +139,9 @@ pub fn validate_script(s: &DialogueScript) -> Result<(), String> {
                     if let Some(n) = next
                         && !conv.nodes.contains_key(n)
                     {
-                        return Err(format!("dialogue '{cid}' node '{nid}': next '{n}' not found"));
+                        return Err(format!(
+                            "dialogue '{cid}' node '{nid}': next '{n}' not found"
+                        ));
                     }
                 }
                 Node::Choice {
@@ -141,7 +149,9 @@ pub fn validate_script(s: &DialogueScript) -> Result<(), String> {
                 } => {
                     check_speaker(speaker, cid, nid)?;
                     if options.is_empty() {
-                        return Err(format!("dialogue '{cid}' node '{nid}': choice has no options"));
+                        return Err(format!(
+                            "dialogue '{cid}' node '{nid}': choice has no options"
+                        ));
                     }
                     for o in options {
                         if !conv.nodes.contains_key(&o.next) {
@@ -172,7 +182,9 @@ fn check_speaker(s: &str, cid: &str, nid: &str) -> Result<(), String> {
 /// Who a script's speaker string stands for, as the host knows it.
 #[derive(Debug, Clone, Default)]
 pub struct Speaker {
-    /// The entity a world balloon anchors to; `None` is a narrator (no balloon).
+    /// The entity a world balloon anchors to; `None` is a narrator (no balloon). Any entity with a
+    /// `Transform` and a `Visibility`, a root or a child: the balloon floats over its world position
+    /// and hides when it is hidden, through its parent too.
     pub entity: Option<Entity>,
     /// Shown on the dialog box's name tag; empty hides the tag.
     pub name: String,
@@ -181,6 +193,10 @@ pub struct Speaker {
 }
 
 /// Speaker string → [`Speaker`]. The host keeps this current (register on spawn, remove on despawn).
+///
+/// A registered speaker without an `entity` is a narrator and is skipped quietly; a key that is not here
+/// at all is skipped with a `warn!` naming it (a bark's once per key, a balloon-mode line's once per
+/// node), because nothing but a misspelt or not-yet-registered key explains it.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct Speakers(pub HashMap<String, Speaker>);
 
@@ -227,8 +243,12 @@ pub struct DialogueNodeEntered {
 pub struct ConversationLock;
 
 /// A one-off ambient balloon over a speaker — barks, reactions. Never blocks play, always a world
-/// balloon whatever the [`Presenter`]; the speaker needs an `entity` in [`Speakers`] or it is dropped.
-#[derive(Message, Debug, Clone)]
+/// balloon whatever the [`Presenter`]; the speaker needs an `entity` in [`Speakers`] or it is dropped
+/// (quietly for a narrator, with one `warn!` per key for a key that is not registered).
+/// Serde, so a game or a tool authors barks as data (RON) with this type and no second schema. A key
+/// the bark does not have (`ttl`) is a parse error naming it, not a value dropped without a word.
+#[derive(Message, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bark {
     pub speaker: String,
     pub kind: BubbleKind,
@@ -244,7 +264,11 @@ pub struct Bark {
 /// in turn-taking*, PNAS 2009, DOI 10.1073/pnas.0903616106) but speech carries prosody. A *read*
 /// balloon has no such cue, so the gap must cover the eye-movement + comprehension cost of noticing
 /// the new balloon; ~1 s is the low end of that.
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+///
+/// Serde, like [`Bark`]: a key this struct does not have (`max_live`) is a parse error, not a setting
+/// that was read and ignored.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BarkSettings {
     /// Minimum seconds between two balloons appearing.
     pub gap: f32,
@@ -283,7 +307,10 @@ pub struct BarkQueue {
 impl BarkQueue {
     /// File a bark, evicting the oldest if the backlog is full.
     pub(crate) fn push(&mut self, bark: Bark, now: f32, settings: &BarkSettings) {
-        self.pending.push_back(PendingBark { bark, queued_at: now });
+        self.pending.push_back(PendingBark {
+            bark,
+            queued_at: now,
+        });
         while self.pending.len() > settings.queue_cap {
             self.pending.pop_front();
         }
@@ -355,8 +382,49 @@ const CHOICE_BASE_PX: f32 = 31.0;
 /// Tint of a choice balloon until hovered, for a clickable affordance.
 const CHOICE_DIM: Color = Color::srgb(0.78, 0.78, 0.78);
 
-fn speaker_entity(speakers: &Speakers, key: &str) -> Option<Entity> {
-    speakers.0.get(key).and_then(|s| s.entity)
+/// What a script's speaker string means to the host.
+enum Resolved {
+    /// Registered with an entity: a balloon anchors to it.
+    Head(Entity),
+    /// Registered without an entity: a narrator, no head to float over. Quiet by design.
+    Narrator,
+    /// Not a key of [`Speakers`]: a misspelt or not-yet-registered key, which is the host's mistake.
+    Unknown,
+}
+
+fn resolve_speaker(speakers: &Speakers, key: &str) -> Resolved {
+    match speakers.0.get(key) {
+        Some(Speaker {
+            entity: Some(entity),
+            ..
+        }) => Resolved::Head(*entity),
+        Some(_) => Resolved::Narrator,
+        None => Resolved::Unknown,
+    }
+}
+
+/// Most distinct unknown bark speakers remembered at once; see [`WarnedSpeakers`].
+const MAX_WARNED_SPEAKERS: usize = 64;
+
+/// The unknown speaker keys a bark path has already warned about, so a bark that fires every few
+/// seconds says its key is missing once rather than every time. Bounded: a game that mints a key per
+/// entity cannot grow it past [`MAX_WARNED_SPEAKERS`]; a full set is cleared, so a key may be warned
+/// about again, never lost.
+#[derive(Default)]
+pub(crate) struct WarnedSpeakers(HashSet<String>);
+
+impl WarnedSpeakers {
+    /// `true` the first time `key` is seen since the set was last cleared.
+    fn first_sight(&mut self, key: &str) -> bool {
+        if self.0.contains(key) {
+            return false;
+        }
+        if self.0.len() >= MAX_WARNED_SPEAKERS {
+            self.0.clear();
+        }
+        self.0.insert(key.to_owned());
+        true
+    }
 }
 
 pub(crate) fn open_conversation(
@@ -453,8 +521,8 @@ pub(crate) fn present_current(
             text,
             ..
         } => {
-            match speaker_entity(&speakers, speaker) {
-                Some(owner) => {
+            match resolve_speaker(&speakers, speaker) {
+                Resolved::Head(owner) => {
                     spawn_line_bubble(
                         &mut commands,
                         &assets,
@@ -472,7 +540,17 @@ pub(crate) fn present_current(
                     active.advance_at = now + dwell_secs(text);
                 }
                 // A narrator has no head to float over: in balloon mode the line is skipped.
-                None => active.advance_at = now,
+                Resolved::Narrator => active.advance_at = now,
+                // A key nobody registered is the host's mistake: the line is skipped just the same,
+                // and the log says which key, which node and which conversation.
+                Resolved::Unknown => {
+                    warn!(
+                        "bevy_speech_bubbles: speaker '{speaker}' of node '{}' in '{}' is not in \
+                         Speakers; skipping its line in balloon mode",
+                        active.node, active.conv
+                    );
+                    active.advance_at = now;
+                }
             }
         }
         Node::Choice {
@@ -481,7 +559,7 @@ pub(crate) fn present_current(
             prompt,
             options,
         } => {
-            let Some(owner) = speaker_entity(&speakers, speaker) else {
+            let Resolved::Head(owner) = resolve_speaker(&speakers, speaker) else {
                 warn!(
                     "bevy_speech_bubbles: choice '{}' needs a speaker with an entity in balloon mode \
                      ('{speaker}' has none); ending",
@@ -766,6 +844,7 @@ pub(crate) fn release_bark(
     settings: Res<BarkSettings>,
     mut queue: ResMut<BarkQueue>,
     speakers: Res<Speakers>,
+    mut warned: Local<WarnedSpeakers>,
     skin: Res<DefaultBalloonSkin>,
     assets: Option<Res<BubbleAssets>>,
     mut images: ResMut<Assets<Image>>,
@@ -783,9 +862,20 @@ pub(crate) fn release_bark(
         warn_once!("bevy_speech_bubbles: barks need a BubbleAssets resource; dropping them");
         return;
     };
-    let Some(owner) = speaker_entity(&speakers, &bark.speaker) else {
-        // Nothing was shown, so the gap is not started — the next bark is eligible immediately.
-        return;
+    let owner = match resolve_speaker(&speakers, &bark.speaker) {
+        Resolved::Head(owner) => owner,
+        // Nothing was shown, so the gap is not started — the next bark is eligible immediately. A
+        // narrator's silence is documented; an unregistered key is warned about, once per key.
+        Resolved::Narrator => return,
+        Resolved::Unknown => {
+            if warned.first_sight(&bark.speaker) {
+                warn!(
+                    "bevy_speech_bubbles: bark speaker '{}' is not in Speakers; dropping the bark ({:?})",
+                    bark.speaker, bark.text
+                );
+            }
+            return;
+        }
     };
     queue.spoke_at(now, &settings);
 
@@ -976,6 +1066,65 @@ mod tests {
         assert!(ron::from_str::<DialogueScript>(bad).is_err());
     }
 
+    /// Parse a script of one conversation whose only node, `a`, is `node`.
+    fn one_node(node: &str) -> Result<DialogueScript, ron::error::SpannedError> {
+        ron::from_str(&format!(
+            r#"( conversations: {{ "x": ( start: "a", nodes: {{ "a": {node} }} ) }} )"#
+        ))
+    }
+
+    /// `kind` and `emotion` are optional on a node, so a misspelt key used to parse, fall back to the
+    /// default and draw the wrong balloon with no word to the author (#12). Each typo is refused
+    /// with the key named, and the same node spelt right loads.
+    #[test]
+    fn a_misspelt_node_field_is_refused() {
+        let cases = [
+            // (typo, the key meant, its value, the node around it)
+            (
+                "emtion",
+                "emotion",
+                "Fear",
+                r#"Line(speaker: "s", KEY: VALUE, text: "hi", next: None)"#,
+            ),
+            (
+                "knid",
+                "kind",
+                "Thought",
+                r#"Line(speaker: "s", KEY: VALUE, text: "hm", next: None)"#,
+            ),
+            (
+                "emotoin",
+                "emotion",
+                "Anger",
+                r#"Choice(speaker: "s", KEY: VALUE, prompt: "?", options: [(text: "t", next: "a")])"#,
+            ),
+        ];
+        for (typo, meant, value, node) in cases {
+            let node = node.replace("VALUE", value);
+            let err = one_node(&node.replace("KEY", typo))
+                .expect_err("a misspelt field must not parse")
+                .to_string();
+            assert!(
+                err.contains(typo),
+                "the diagnostic names the misspelt key: {err}"
+            );
+            one_node(&node.replace("KEY", meant))
+                .unwrap_or_else(|e| panic!("`{meant}` spelt right loads: {e}"));
+        }
+    }
+
+    /// A choice is always a speech balloon: it has no `kind`, so `kind: Thought` on one is an
+    /// unknown field, not a silently dropped request for a thought balloon.
+    #[test]
+    fn a_field_the_variant_lacks_is_refused() {
+        let err = one_node(
+            r#"Choice(speaker: "s", kind: Thought, prompt: "?", options: [(text: "t", next: "a")])"#,
+        )
+        .expect_err("a choice has no `kind`")
+        .to_string();
+        assert!(err.contains("kind"), "{err}");
+    }
+
     #[test]
     fn merge_adds_and_refuses_duplicates() {
         let mut a = sample();
@@ -1009,7 +1158,10 @@ mod tests {
             .init_resource::<Presenter>()
             .insert_resource(ConversationLock)
             // Same order as the plugin: a digit pressed this frame must resolve this frame.
-            .add_systems(Update, (choice_hotkeys, resolve_choice, advance_line).chain());
+            .add_systems(
+                Update,
+                (choice_hotkeys, resolve_choice, advance_line).chain(),
+            );
         app
     }
 
@@ -1083,7 +1235,9 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(key);
         app.update();
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
     }
 
     /// A choice never auto-advances, so an *unanswerable* choice is an unrecoverable run. This walks
@@ -1095,7 +1249,11 @@ mod tests {
         park(&mut app, "ask");
 
         tap(&mut app, KeyCode::Digit2);
-        assert_eq!(node_of(&app).as_deref(), Some("moved"), "'2' takes the second option");
+        assert_eq!(
+            node_of(&app).as_deref(),
+            Some("moved"),
+            "'2' takes the second option"
+        );
 
         // The presenter would put the new line on screen; stand in for it and read it.
         if let Some(mut a) = app.world_mut().get_resource_mut::<Active>() {
@@ -1201,8 +1359,14 @@ mod tests {
         q.spoke_at(0.0, &s);
 
         assert!(q.take_ready(0.5, &s).is_none(), "reply jumped the gap");
-        assert!(q.take_ready(s.gap - 0.01, &s).is_none(), "reply jumped the gap");
-        assert_eq!(q.take_ready(s.gap, &s).map(|b| b.text), Some("Copy.".into()));
+        assert!(
+            q.take_ready(s.gap - 0.01, &s).is_none(),
+            "reply jumped the gap"
+        );
+        assert_eq!(
+            q.take_ready(s.gap, &s).map(|b| b.text),
+            Some("Copy.".into())
+        );
     }
 
     #[test]
@@ -1263,7 +1427,10 @@ mod tests {
             t += 0.1;
         }
         assert!(spoken.len() >= 3, "expected a paced drain, got {spoken:?}");
-        assert!(spoken.len() <= s.queue_cap, "released more than were queued");
+        assert!(
+            spoken.len() <= s.queue_cap,
+            "released more than were queued"
+        );
         for w in spoken.windows(2) {
             assert!(
                 w[1].1 - w[0].1 >= s.gap - 1.0e-3,
@@ -1272,5 +1439,41 @@ mod tests {
                 w[1]
             );
         }
+    }
+
+    #[test]
+    fn a_speaker_resolves_to_a_head_a_narrator_or_nothing() {
+        let mut speakers = Speakers::default();
+        let head = Entity::from_raw_u32(7).expect("a valid index");
+        speakers.0.insert(
+            "miller".into(),
+            Speaker {
+                entity: Some(head),
+                ..Default::default()
+            },
+        );
+        speakers.0.insert("voice".into(), Speaker::default());
+        assert!(matches!(resolve_speaker(&speakers, "miller"), Resolved::Head(e) if e == head));
+        assert!(matches!(
+            resolve_speaker(&speakers, "voice"),
+            Resolved::Narrator
+        ));
+        assert!(matches!(
+            resolve_speaker(&speakers, "miler"),
+            Resolved::Unknown
+        ));
+    }
+
+    #[test]
+    fn a_key_is_warned_once_and_the_set_never_outgrows_its_bound() {
+        let mut warned = WarnedSpeakers::default();
+        assert!(warned.first_sight("a"));
+        assert!(!warned.first_sight("a"));
+        for i in 0..MAX_WARNED_SPEAKERS * 3 {
+            warned.first_sight(&format!("key{i}"));
+            assert!(warned.0.len() <= MAX_WARNED_SPEAKERS);
+        }
+        // Past the bound the oldest keys were forgotten, so one is warned about again.
+        assert!(warned.first_sight("a"));
     }
 }
