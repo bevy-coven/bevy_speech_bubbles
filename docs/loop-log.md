@@ -525,3 +525,74 @@ Numbering: iterations 1 and 2 were passes killed before they logged; their work 
    column; `BUBBLES_SHOT` in `chatter`; a permanent test that 1000 expired barks return the asset counts;
    `Bark` and `Node::Line` disagree on optional fields (iteration 5, item 4); a "did you mean" hint on an
    unknown key.
+
+## Hand-driven pass — 2026-11-06 — speaker aliases, presses and cost, skip, unattended delivery (#5, #6, #7, #8)
+
+Hand-driven, owner request 2026-11-06, host bmb. Not a loop iteration (no driver, no `steps.py`, no
+baseline worktree); the next loop pass numbers itself from iteration 6. The owner asked for the open
+issues in order: #5, #6, #7, #8 (no bug and no `consumer` issue was open). Parked work checked first:
+`origin/loop/iter-1` held pass 1's `Research: barks` (c402d0f) and a parked `tests/alias.rs` (2dcaff3),
+both adopted for #5; the parked `examples/bench.rs` was already on `main`.
+
+- **#5 speaker aliases.** Measured on main: barks share one global `BarkQueue` and a new bark replaces the
+  one over its entity, so two keys on one entity already showed one balloon at a time; the issue's premise
+  (per-key pacing) does not hold, and its acceptance 4 is pinned the other way (assumed decision on #5).
+  Built `Speakers::alias` / `unalias` / `get` / `resolve_key`: one hop, the alias wins, a missing target
+  silences it, barks resolve in `queue_barks`; the dialog box and balloon-mode lines read the same resolver.
+  `tests/alias.rs` (6): failed to compile on main (6x E0599), passes.
+- **#6 progress and skip.** `ConversationProgress` (present exactly while a conversation runs; node, line,
+  lines_left, typing, `presses_to_close()`, `None` while a choice lies ahead) and `SkipConversation`
+  (enters each node through the one `Active::enter`, ends through the one `finish`, stops at a choice).
+  Assumed decision: a typed boxed line costs two presses wherever it is (`2L`, not the issue's `L + 1`).
+- **#7 cost.** `DialogueScript::cost(id, PressRule)` / `fits`: a post-order longest path, explicit stack,
+  `CostError` for unknown / missing node / loop. `ConversationEnded` gains `nodes_seen`, `presses`,
+  `skipped` instead of a second `DialogueFinished` message (assumed decision on #7). `tests/progress.rs`
+  (11): failed to compile before (E0432, E0599), passes; `the_runtime_charges_what_cost_predicted` ties
+  the runtime's count to `cost`.
+- **#8 delivery.** `StartConversation::delivery` (`Modal` default, `Unattended`): no lock, no key read or
+  consumed, each line advances once typed and up for `dwell_secs`; a choice or a loop is refused at the
+  start. `tests/unattended.rs` (5): failed to compile before (E0432, E0560), passes. Not built:
+  `Delivery::Until { seconds }`, a modal start preempting an unattended one (assumed decision on #8).
+- **Sources.** `barks.md` (Schegloff 2000 `10.1017_s0047404500001019`; Gregory 2018 §14.6.2),
+  `presses-and-cost.md` (Yarn Spinner Line Advancer; longest-path problem), `delivery.md` (Yarn Spinner
+  Line Presenter Auto Advance). home-still unreachable all pass (`hs distill search`: no route to
+  192.168.1.110; MCP bridge not connected): corpus searches listed under each note's `Pending index`.
+- **Per-frame cost (bench, `examples/bench.rs`, FiraMono, three interleaved runs each of the `128b806`
+  baseline and this tree, median of medians).** The first cut regressed every frame case 14-16 %
+  (frame-live 200 balloons 93.7 -> 108.1 us) even with no conversation: two new chained systems with
+  `Commands` each added a sync point. Fixed in `b71da9d` (skip inside `advance_line`; progress inserted
+  by `open_conversation`; `sync_progress` without `Commands`, last, behind `run_if`). After: frame-live 0
+  balloons 92.8 -> 95.0 us (+2.4 %), 50: 93.0 -> 94.5, 200: 94.3 -> 96.6 (+2.4 %), child 200: 97.0 ->
+  98.6; bark-burst worst 908.0 -> 934.6 us (+2.9 %), median 90.7 -> 91.1; raster 240-char crt speech
+  367.4 -> 366.2 us; assets 0 -> 115 peak -> 0 images; presses greeting 6 (box) / 3 (balloons), gate 5 / 3,
+  unchanged, and the box's 6 for three typed lines is the `2L` the #6 decision counts. All under 5 %.
+- **Gate** (log removed with `/tmp/bsb-hand`): `cargo build`, `cargo build --release`, `cargo nextest run` (96
+  passed), `cargo test --doc` (2 passed, 1 ignored), `cargo build --examples`, `cargo clippy --all-targets
+  -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, `rustfmt --check` on every file this
+  pass changed except `tests/walk.rs`, `src/lib.rs`, `src/dialog_box.rs` and `examples/dialog_box.rs`,
+  which keep their pre-existing hunks and add none. `cargo semver-checks` (0.51.0 binary): 2 major
+  lints (`constructible_struct_adds_field` on `StartConversation` and `ConversationEnded`,
+  `constructible_struct_adds_private_field` on `Speakers`), so the release is 0.3.0.
+- **Visible change.** None in the renderer (an unattended conversation is the same box or balloons), so no
+  new still; `docs/chatter.gif` unchanged and still true.
+- **Release.** `v0.3.0` (breaking: `Speakers`, `StartConversation`, `ConversationEnded`), the last tag
+  `v0.2.2` being 6 days old. This host has no crates.io credentials: the `release: v0.3.0` commit and
+  `cargo publish --dry-run` are done here, untagged; the orchestrator on big publishes from the sha in
+  `~/coven-wt/bevy_speech_bubbles.PUBLISH-READY` and pushes the tag.
+- **Cleanup.** Removed this pass's baseline worktree `~/coven-wt/bsb_hand_base` (detached at `128b806`,
+  built into the shared target dir, so no `-target` of its own) and `/tmp/bsb-hand` (bench outputs, the
+  `cargo-semver-checks` 0.51.0 binary, gate log). The shared target dir is kept. No leftovers from earlier
+  passes in `git worktree list`.
+- **Disk.** The volume was at 100 % (574 MB free) when the pass started; the first test link failed with
+  `ld: write() failed, errno=28`. The shared target dir was this pass's own (every file newer than the
+  pass start), so it was removed and rebuilt with `CARGO_PROFILE_DEV_DEBUG=0` (5.4 GB instead of 8.2).
+- **Toolchain.** `rustup update stable` (1.94.0 -> 1.99.1): `wesl-macros` 0.6.0 needs rustc 1.97.1.
+
+### Ranked backlog for the next iteration
+
+1. **`dwell_secs` for unspaced scripts** (iteration 6's bug, still open): a 35-character Chinese line gets
+   the 1.8 s floor; it now also paces unattended conversations, so it matters more.
+2. **A modal start while an unattended conversation runs** (#8 follow-up): replace or queue it rather than
+   ignore it.
+3. **The rest of iteration 6's backlog** (UI layout harness, raster cost, small ones).
+4. **Corpus searches pending** from `presses-and-cost.md` and `delivery.md` once home-still answers.
