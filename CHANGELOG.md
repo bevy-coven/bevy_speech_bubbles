@@ -6,6 +6,8 @@ All notable changes to this crate are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
 ### Changed
 
 - **Breaking:** `Speakers` gains a private alias table, so it is `Speakers(pub HashMap<String, Speaker>, _)` and can no longer be built as `Speakers(map)`; build it with `Speakers::default()` and fill `.0`, which is unchanged.
