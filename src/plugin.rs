@@ -8,10 +8,10 @@ use bevy::prelude::*;
 
 use crate::balloon::{BalloonScale, DefaultBalloonSkin, expire_bubbles, track_bubbles};
 use crate::conversation::{
-    Bark, BarkQueue, BarkSettings, ChoicePicked, ConversationEnded, DialogueNodeEntered,
-    DialogueScript, Presenter, SkipConversation, Speakers, StartConversation, advance_line,
-    choice_hotkeys, open_conversation, present_current, queue_barks, release_bark, resolve_choice,
-    skip_conversation, sync_progress,
+    Bark, BarkQueue, BarkSettings, ChoicePicked, ConversationEnded, ConversationProgress,
+    DialogueNodeEntered, DialogueScript, Presenter, SkipConversation, Speakers, StartConversation,
+    advance_line, choice_hotkeys, open_conversation, present_current, queue_barks, release_bark,
+    resolve_choice, sync_progress,
 };
 use crate::dialog_box::{
     ChoiceFocus, animate_box, caret_blink, choice_focus_input, paint_choices, present_dialog_box,
@@ -66,13 +66,12 @@ impl<C: Component> Plugin for SpeechBubblesPlugin<C> {
                 PreUpdate,
                 (
                     open_conversation,
-                    // A skip before input, so a press on the same frame meets the node it led to.
-                    skip_conversation,
                     // Input before `resolve_choice`, so a digit or `Enter` pressed this frame
                     // resolves this frame.
                     choice_hotkeys,
                     choice_focus_input,
                     resolve_choice,
+                    // Also runs a `SkipConversation`, so a skip costs no system of its own.
                     advance_line,
                     present_current,
                     present_dialog_box,
@@ -89,13 +88,15 @@ impl<C: Component> Plugin for SpeechBubblesPlugin<C> {
                 Update,
                 (
                     typewriter_tick,
-                    // After the typewriter, so `ConversationProgress::typing` is this frame's.
-                    sync_progress,
                     paint_choices,
                     caret_blink,
                     animate_box,
                     track_bubbles::<C>,
                     expire_bubbles,
+                    // After the typewriter, so `ConversationProgress::typing` is this frame's. A run
+                    // condition, not an early return, so a frame with no conversation skips it in the
+                    // executor without scheduling it.
+                    sync_progress.run_if(resource_exists::<ConversationProgress>),
                 )
                     .chain(),
             );

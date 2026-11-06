@@ -805,6 +805,8 @@ pub(crate) fn open_conversation(
     mut starts: MessageReader<StartConversation>,
     active: Option<Res<Active>>,
     script: Res<DialogueScript>,
+    presenter: Res<Presenter>,
+    skin: Option<Res<crate::DialogSkin>>,
     mut entered: MessageWriter<DialogueNodeEntered>,
 ) {
     // One conversation at a time; take the first request and drain the rest of the queue.
@@ -841,6 +843,8 @@ pub(crate) fn open_conversation(
     }
     let mut cursor = Active::new(&id, delivery);
     cursor.enter(&conv.start, &script, &mut entered);
+    let rule = rule_of(delivery, *presenter, skin.as_deref());
+    commands.insert_resource(progress_of(conv, &cursor, false, rule));
     commands.insert_resource(cursor);
     if delivery == Delivery::Modal {
         commands.insert_resource(ConversationLock);
@@ -1053,10 +1057,24 @@ pub(crate) fn advance_line(
     mut typewriters: Query<&mut Typewriter>,
     mut ended: MessageWriter<ConversationEnded>,
     mut entered: MessageWriter<DialogueNodeEntered>,
+    mut skips: MessageReader<SkipConversation>,
 ) {
+    let skip_asked = skips.read().next().is_some();
+    skips.clear();
     let Some(mut active) = active else {
         return;
     };
+    if skip_asked {
+        skip(
+            &mut commands,
+            &mut active,
+            &script,
+            &existing,
+            &mut ended,
+            &mut entered,
+        );
+        return;
+    }
     if !active.presented {
         return;
     }
@@ -1211,21 +1229,16 @@ pub(crate) fn finish(
 
 /// Run a [`SkipConversation`]: advance line by line, announcing each node, to the end (closing it) or
 /// to the next choice (left to be presented and picked). A line graph that loops stops where it would
-/// re-enter a node it entered during this skip, so a skip always terminates.
-pub(crate) fn skip_conversation(
-    mut commands: Commands,
-    mut skips: MessageReader<SkipConversation>,
-    active: Option<ResMut<Active>>,
-    script: Res<DialogueScript>,
-    existing: Query<Entity, With<ConversationEntity>>,
-    mut ended: MessageWriter<ConversationEnded>,
-    mut entered: MessageWriter<DialogueNodeEntered>,
+/// re-enter a node it entered during this skip, so a skip always terminates. Called by
+/// [`advance_line`], so a skip adds no system and no command sync point to the frame.
+fn skip(
+    commands: &mut Commands,
+    active: &mut Active,
+    script: &DialogueScript,
+    existing: &Query<Entity, With<ConversationEntity>>,
+    ended: &mut MessageWriter<ConversationEnded>,
+    entered: &mut MessageWriter<DialogueNodeEntered>,
 ) {
-    if skips.read().next().is_none() {
-        return;
-    }
-    skips.clear();
-    let Some(mut active) = active else { return };
     let mut passed: HashSet<String> = HashSet::new();
     loop {
         let next = match script
@@ -1240,7 +1253,7 @@ pub(crate) fn skip_conversation(
                     "bevy_speech_bubbles: node '{}' of '{}' is missing; ending",
                     active.node, active.conv
                 );
-                finish(&mut commands, &existing, &mut ended, &active, true);
+                finish(commands, existing, ended, active, true);
                 return;
             }
         };
@@ -1251,12 +1264,12 @@ pub(crate) fn skip_conversation(
                     "bevy_speech_bubbles: skipping '{}' loops back to node '{n}'; stopping there",
                     active.conv
                 );
-                active.enter(&n, &script, &mut entered);
+                active.enter(&n, script, entered);
                 return;
             }
-            Some(n) => active.enter(&n, &script, &mut entered),
+            Some(n) => active.enter(&n, script, entered),
             None => {
-                finish(&mut commands, &existing, &mut ended, &active, true);
+                finish(commands, existing, ended, active, true);
                 return;
             }
         }
@@ -1303,29 +1316,30 @@ fn remaining(
     (lines, presses)
 }
 
-/// Keep [`ConversationProgress`] current. `Update`, after the typewriter ticks.
-pub(crate) fn sync_progress(
-    mut commands: Commands,
-    active: Option<Res<Active>>,
-    script: Res<DialogueScript>,
-    presenter: Res<Presenter>,
-    skin: Option<Res<crate::DialogSkin>>,
-    typewriters: Query<&Typewriter>,
-    progress: Option<ResMut<ConversationProgress>>,
-) {
-    let Some(active) = active else { return };
-    let Some(conv) = script.conversation(&active.conv) else {
-        return;
-    };
-    let cps = skin.map_or(crate::DEFAULT_CHARS_PER_SECOND, |s| s.chars_per_second);
-    // An unattended conversation takes no press at all: every line is timed.
-    let rule = match active.delivery {
-        Delivery::Modal => PressRule::new(*presenter, cps),
+/// The rule a conversation is charged by: an unattended one takes no press at all.
+fn rule_of(
+    delivery: Delivery,
+    presenter: Presenter,
+    skin: Option<&crate::DialogSkin>,
+) -> PressRule {
+    match delivery {
+        Delivery::Modal => PressRule::new(
+            presenter,
+            skin.map_or(crate::DEFAULT_CHARS_PER_SECOND, |s| s.chars_per_second),
+        ),
         Delivery::Unattended => PressRule::Timed,
-    };
-    let typing = *presenter == Presenter::DialogBox && typewriters.iter().any(|t| !t.complete());
-    let (lines_left, presses_to_close) = remaining(conv, &active, typing, rule);
-    let now = ConversationProgress {
+    }
+}
+
+/// Where `active` stands in `conv`.
+fn progress_of(
+    conv: &Conversation,
+    active: &Active,
+    typing: bool,
+    rule: PressRule,
+) -> ConversationProgress {
+    let (lines_left, presses_to_close) = remaining(conv, active, typing, rule);
+    ConversationProgress {
         conversation: active.conv.clone(),
         delivery: active.delivery,
         node: active.node.clone(),
@@ -1333,14 +1347,42 @@ pub(crate) fn sync_progress(
         lines_left,
         typing,
         presses_to_close,
+    }
+}
+
+/// Keep [`ConversationProgress`] current (`open_conversation` inserts it, `finish` removes it).
+/// `Update`, after the typewriter ticks. No `Commands`, so it adds no sync point to the frame.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sync_progress(
+    active: Option<Res<Active>>,
+    script: Res<DialogueScript>,
+    presenter: Res<Presenter>,
+    skin: Option<Res<crate::DialogSkin>>,
+    typewriters: Query<&Typewriter>,
+    typed: Query<(), Changed<Typewriter>>,
+    progress: Option<ResMut<ConversationProgress>>,
+) {
+    let (Some(active), Some(mut progress)) = (active, progress) else {
+        return;
     };
-    match progress {
-        Some(mut p) => {
-            if *p != now {
-                *p = now;
-            }
-        }
-        None => commands.insert_resource(now),
+    // Nothing a count reads moved this frame: no allocation, no walk. A line on screen that has
+    // finished typing changes nothing until the next press or timeout.
+    let unchanged = !active.is_changed()
+        && !script.is_changed()
+        && !presenter.is_changed()
+        && !skin.as_ref().is_some_and(|s| s.is_changed())
+        && typed.is_empty();
+    if unchanged {
+        return;
+    }
+    let Some(conv) = script.conversation(&active.conv) else {
+        return;
+    };
+    let rule = rule_of(active.delivery, *presenter, skin.as_deref());
+    let typing = *presenter == Presenter::DialogBox && typewriters.iter().any(|t| !t.complete());
+    let now = progress_of(conv, &active, typing, rule);
+    if *progress != now {
+        *progress = now;
     }
 }
 
@@ -1690,6 +1732,7 @@ mod tests {
         app.add_message::<ChoicePicked>()
             .add_message::<ConversationEnded>()
             .add_message::<DialogueNodeEntered>()
+            .add_message::<SkipConversation>()
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<Time<Real>>()
