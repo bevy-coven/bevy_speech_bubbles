@@ -10,10 +10,12 @@ All notable changes to this crate are recorded here. The format follows
 
 - **Breaking:** `Speakers` gains a private alias table, so it is `Speakers(pub HashMap<String, Speaker>, _)` and can no longer be built as `Speakers(map)`; build it with `Speakers::default()` and fill `.0`, which is unchanged.
 - **Breaking:** `ConversationEnded` gains `nodes_seen` (distinct nodes entered), `presses` (presses the conversation used) and `skipped`, written on every way out, so a host learns what was read and can tell a skipped conversation from a read one (#7). It now derives `PartialEq` and `Eq`.
+- **Breaking:** `StartConversation` gains `delivery: Delivery` and derives `Default`; write `StartConversation { id, ..default() }` for today's modal conversation (#8).
 - The README follows the bevy-coven org's documentation guide: the org banner, badges, a Status and a Why line, a quick start that is compiled as a doctest, a still image, and "What you can do" bullets linking `docs/guide/`, where every section it used to carry now lives unchanged. Image and file links are absolute URLs, so docs.rs shows them.
 
 ### Added
 
+- `Delivery::Unattended` on `StartConversation`: the conversation takes no `ConversationLock`, reads and consumes no key or click, and closes itself, each line advancing once typed and up for its `dwell_secs`, in the box or in balloons. A conversation with a choice or a loop is refused at the start. `ConversationProgress` (with its new `delivery` field) answers "is a conversation up", `ConversationLock` "is it modal" (#8).
 - `Speakers::alias(alias, target)`, `Speakers::unalias`, `Speakers::get` and `Speakers::resolve_key`: two speaker keys that are one character (a game's `person:7`, a simulation's `society:7`) share the target's head, name, portrait and bark turn. One hop, the alias wins over the alias key's own registration, a missing target silences it, and a bark resolves its alias when it is queued (#5).
 - `ConversationProgress`, a resource present exactly while a conversation runs: its node, `line`, `lines_left` (to the end or the next choice), `typing`, and `presses_to_close()`, the presses that close it from here (a typed boxed line costs two), `None` while a choice lies ahead (#6).
 - `SkipConversation`: finishes the running conversation without the player, entering each node as presses would (`DialogueNodeEntered` for each), ending it once or stopping at the next choice (#6).

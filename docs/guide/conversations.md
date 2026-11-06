@@ -15,11 +15,11 @@ commands.insert_resource(BubbleAssets {
 });
 
 speakers.0.insert("keeper".into(), Speaker { entity: Some(keeper), name: "The Keeper".into(), portrait: None });
-starts.write(StartConversation { id: "gate".into() });
+starts.write(StartConversation { id: "gate".into(), ..default() });
 barks.write(Bark { speaker: "keeper".into(), kind: BubbleKind::Speech, emotion: Emotion::Neutral, text: "Mind the step.".into() });
 ```
 
-While a conversation runs the resource `ConversationLock` exists: pause on it, and yield your own click handling to it. A script looks like this (RON; any serde format works):
+While a modal conversation runs the resource `ConversationLock` exists: pause on it, and yield your own click handling to it. A script looks like this (RON; any serde format works):
 
 ```ron
 (conversations: {
@@ -64,9 +64,17 @@ match script.cost("greet", rule) {
     Ok(c) => info!("{} lines, at most {} presses, branches: {}", c.lines, c.presses, c.branches),
     Err(e) => warn!("{e}"), // an unknown id, a missing node, or a loop (`CostError::Unbounded`)
 }
-if script.fits("greet", 3, rule) { starts.write(StartConversation { id: "greet".into() }); }
+if script.fits("greet", 3, rule) { starts.write(StartConversation { id: "greet".into(), ..default() }); }
 ```
 
 With a choice, `lines` and `presses` are each the maximum over every path, so a gate on them is a guarantee.
 
 `SkipConversation` finishes the running conversation without the player: it advances node by node, writing `DialogueNodeEntered` for each as presses would, and ends it, or stops at the next choice and leaves the pick. `ConversationEnded` says what the player was there for on every way out: `nodes_seen` (distinct nodes entered), `presses` (presses the conversation used) and `skipped`.
+
+## A conversation the world does not wait for: `Delivery::Unattended`
+
+```rust,ignore
+starts.write(StartConversation { id: "night_falls".into(), delivery: Delivery::Unattended });
+```
+
+An unattended conversation is drawn by the same presenter (box or balloons, same typewriter, same skin) but takes no `ConversationLock`, reads and consumes no key or click, and closes itself: each line advances once it has finished typing and has been up for its reading time (`dwell_secs`). Your game keeps its keys and its clock. `ConversationProgress` is present while any conversation is up, `ConversationLock` only while a modal one is, so a HUD that hides behind a card asks the first and a pause asks the second. A conversation with a choice (nobody is there to pick) or a loop (it would never close) is refused at the start with a `warn!`. One conversation runs at a time, unattended or not; a start while one runs is ignored, so queue your own hints. `Delivery::Modal` is the default and behaves as before.
