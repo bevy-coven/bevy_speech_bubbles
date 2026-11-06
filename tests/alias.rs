@@ -121,16 +121,27 @@ fn an_alias_and_its_target_bark_as_one_person() {
     bark(&mut app, "person:7", "Mind the step.");
     let seen = watch(&mut app, frames_for(3.0));
 
-    assert_eq!(seen.appeared.len(), 2, "both barks should be shown: {:?}", seen.appeared);
+    assert_eq!(
+        seen.appeared.len(),
+        2,
+        "both barks should be shown: {:?}",
+        seen.appeared
+    );
     assert!(
         seen.appeared.iter().all(|(owner, _)| *owner == villager),
         "an aliased bark floated over another head: {:?}",
         seen.appeared
     );
-    assert_eq!(seen.most_over_one_head, 1, "two balloons were up over one head at once");
+    assert_eq!(
+        seen.most_over_one_head, 1,
+        "two balloons were up over one head at once"
+    );
     let gap = app.world().resource::<BarkSettings>().gap;
     let between = (seen.appeared[1].1 - seen.appeared[0].1) as f32 * STEP.as_secs_f32();
-    assert!(between >= gap, "the second bark came {between} s after the first, under the {gap} s gap");
+    assert!(
+        between >= gap,
+        "the second bark came {between} s after the first, under the {gap} s gap"
+    );
 }
 
 /// A key that is aliased and also registered on its own (a simulation registers `society:<id>` for
@@ -148,7 +159,10 @@ fn an_alias_wins_over_the_key_s_own_registration() {
 
     bark(&mut app, "society:7", "The well is dry again.");
     let seen = watch(&mut app, 2);
-    assert_eq!(seen.appeared.iter().map(|(o, _)| *o).collect::<Vec<_>>(), vec![figure]);
+    assert_eq!(
+        seen.appeared.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+        vec![figure]
+    );
 }
 
 /// Issue #5, acceptance 3: an alias whose target is not registered (never, or no longer) drops the
@@ -164,13 +178,20 @@ fn an_alias_to_an_absent_speaker_drops_the_bark_and_holds_nothing_up() {
         .resource_mut::<Speakers>()
         .alias("society:7", "person:7");
     // The villager despawns and the host removes its key.
-    app.world_mut().resource_mut::<Speakers>().0.remove("person:7");
+    app.world_mut()
+        .resource_mut::<Speakers>()
+        .0
+        .remove("person:7");
 
     bark(&mut app, "society:7", "The well is dry again.");
     bark(&mut app, "person:8", "Evening.");
     // One bark is released per update: the orphaned alias's is dropped, then the other goes up.
     let seen = watch(&mut app, 2);
-    assert_eq!(seen.appeared, vec![(other, 1)], "the dropped bark held up or replaced the next one");
+    assert_eq!(
+        seen.appeared,
+        vec![(other, 1)],
+        "the dropped bark held up or replaced the next one"
+    );
 }
 
 /// Issue #5, acceptance 4: without an alias, two keys on one entity are still one head — main has a
@@ -186,7 +207,10 @@ fn two_keys_on_one_entity_show_one_balloon_at_a_time() {
     bark(&mut app, "person:7", "Mind the step.");
     let seen = watch(&mut app, frames_for(3.0));
     assert_eq!(seen.appeared.len(), 2);
-    assert_eq!(seen.most_over_one_head, 1, "two keys on one entity stacked their balloons");
+    assert_eq!(
+        seen.most_over_one_head, 1,
+        "two keys on one entity stacked their balloons"
+    );
 }
 
 /// A bark resolves its alias when it is queued: re-pointing the alias while the bark waits for the
@@ -214,7 +238,11 @@ fn re_pointing_an_alias_does_not_move_a_waiting_bark() {
     let owners: Vec<Entity> = seen.appeared.iter().map(|(o, _)| *o).collect();
     // The stranger's bark is still up when the watch starts; the waiting one follows the gap. Had it
     // followed the alias it would have replaced the stranger's balloon instead.
-    assert_eq!(owners, vec![stranger, villager], "the waiting bark followed the re-pointed alias");
+    assert_eq!(
+        owners,
+        vec![stranger, villager],
+        "the waiting bark followed the re-pointed alias"
+    );
 }
 
 const ONE_LINE: &str = r#"
@@ -272,21 +300,35 @@ fn a_conversation_line_by_an_alias_speaks_as_its_target() {
         app.insert_resource(script)
             .insert_resource(presenter)
             .insert_resource(dialog_skin());
-        app.world_mut()
-            .write_message(StartConversation { id: "well".into() });
+        app.world_mut().write_message(StartConversation {
+            id: "well".into(),
+            ..default()
+        });
         app.update();
 
         let world = app.world_mut();
         match presenter {
             Presenter::DialogBox => {
-                let texts: Vec<String> =
-                    world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
-                assert!(texts.iter().any(|t| t == "Mara"), "no 'Mara' name tag: {texts:?}");
-                assert!(!texts.iter().any(|t| t == "someone"), "the alias's own name showed");
+                let texts: Vec<String> = world
+                    .query::<&Text>()
+                    .iter(world)
+                    .map(|t| t.0.clone())
+                    .collect();
+                assert!(
+                    texts.iter().any(|t| t == "Mara"),
+                    "no 'Mara' name tag: {texts:?}"
+                );
+                assert!(
+                    !texts.iter().any(|t| t == "someone"),
+                    "the alias's own name showed"
+                );
             }
             Presenter::Balloons => {
-                let owners: Vec<Entity> =
-                    world.query::<&Bubble>().iter(world).map(|b| b.owner).collect();
+                let owners: Vec<Entity> = world
+                    .query::<&Bubble>()
+                    .iter(world)
+                    .map(|b| b.owner)
+                    .collect();
                 assert_eq!(owners, vec![figure], "the line floated over the wrong head");
             }
         }

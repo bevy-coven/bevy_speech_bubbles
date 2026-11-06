@@ -323,6 +323,7 @@ fn setup(
     );
     starts.write(StartConversation {
         id: launch.conversation.clone(),
+        ..default()
     });
 }
 
@@ -343,6 +344,7 @@ fn restart(
         *waiting = false;
         starts.write(StartConversation {
             id: launch.conversation.clone(),
+            ..default()
         });
     }
 }

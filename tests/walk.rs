@@ -121,7 +121,10 @@ fn tap(app: &mut App, key: KeyCode) {
 }
 
 fn start(app: &mut App) {
-    app.world_mut().write_message(StartConversation { id: "t".into() });
+    app.world_mut().write_message(StartConversation {
+        id: "t".into(),
+        ..default()
+    });
     app.update();
 }
 

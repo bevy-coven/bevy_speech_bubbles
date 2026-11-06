@@ -467,8 +467,10 @@ fn presses(font: &FontArc) {
             app.insert_resource(script.clone())
                 .insert_resource(presenter)
                 .insert_resource(dialog_skin());
-            app.world_mut()
-                .write_message(StartConversation { id: id.into() });
+            app.world_mut().write_message(StartConversation {
+                id: id.into(),
+                ..default()
+            });
             let mut node = String::new();
             let mut presses = 0;
             let mut ended = 0;

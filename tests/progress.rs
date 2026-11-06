@@ -131,8 +131,10 @@ fn app(presenter: Presenter) -> App {
 }
 
 fn start(app: &mut App, id: &str) {
-    app.world_mut()
-        .write_message(StartConversation { id: id.into() });
+    app.world_mut().write_message(StartConversation {
+        id: id.into(),
+        ..default()
+    });
     app.update();
 }
 
