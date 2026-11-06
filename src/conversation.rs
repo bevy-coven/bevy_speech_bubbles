@@ -460,10 +460,28 @@ pub enum Presenter {
     DialogBox,
 }
 
-/// Start (or ignore, if one is already running) the named conversation.
-#[derive(Message, Debug, Clone)]
+/// Start (or ignore, if one is already running) the named conversation, delivered as `delivery` says.
+/// `StartConversation { id: "gate".into(), ..default() }` is a [`Delivery::Modal`] one.
+#[derive(Message, Debug, Clone, Default)]
 pub struct StartConversation {
     pub id: String,
+    pub delivery: Delivery,
+}
+
+/// How one conversation reaches the player, chosen by the host when it starts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// The conversation holds [`ConversationLock`] (hosts pause and yield input on it) and waits for
+    /// the player's presses in [`Presenter::DialogBox`].
+    #[default]
+    Modal,
+    /// The world keeps running: no [`ConversationLock`], no key or click is read or consumed, and
+    /// every line advances on its own once it is typed and has been up for its reading time
+    /// ([`dwell_secs`]), so the conversation closes itself. Shown by the same [`Presenter`] as a modal
+    /// one, so a toast and a card are one renderer. Needs a conversation without choices (nobody is
+    /// there to pick) and without loops (it must close): another is refused with a `warn!`.
+    /// "Is a conversation up" is [`ConversationProgress`]; "is it modal" is [`ConversationLock`].
+    Unattended,
 }
 
 /// A choice option was picked (index within the current choice node). Written by the pointer, the
@@ -497,13 +515,16 @@ pub struct ConversationEnded {
 #[derive(Message, Debug, Clone, Copy, Default)]
 pub struct SkipConversation;
 
-/// Where the running conversation stands; present exactly while one runs (inserted when it opens,
-/// removed when it ends), so `Option<Res<ConversationProgress>>` answers "is a conversation up".
-/// Updated in `Update` after the typewriter ticks, so it is current for any system that runs later in
-/// the frame.
+/// Where the running conversation stands; present exactly while one runs, modal or
+/// [`Delivery::Unattended`] (inserted in `Update` of the frame it opens, removed when it ends), so
+/// `Option<Res<ConversationProgress>>` answers "is a conversation up" and [`ConversationLock`] "is it
+/// modal". Updated in `Update` after the typewriter ticks, so it is current for any system that runs
+/// later in the frame.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ConversationProgress {
     pub conversation: String,
+    /// How it was started.
+    pub delivery: Delivery,
     /// The node the cursor is on.
     pub node: String,
     /// Lines entered so far, the one on screen included (1 on the first line).
@@ -655,8 +676,11 @@ pub(crate) struct Active {
     pub(crate) node: String,
     /// Set once the current node is on screen (so a node is presented exactly once).
     pub(crate) presented: bool,
-    /// Real time at which a [`Presenter::Balloons`] line auto-advances (lines only).
+    /// Real time at which a line auto-advances: a [`Presenter::Balloons`] line, or an unattended
+    /// line once typed. `INFINITY` while it waits for a press (or, unattended, for its typing).
     pub(crate) advance_at: f32,
+    /// How the conversation was started.
+    pub(crate) delivery: Delivery,
     /// Distinct nodes entered ([`ConversationEnded::nodes_seen`]).
     pub(crate) seen: HashSet<String>,
     /// Presses used ([`ConversationEnded::presses`]).
@@ -668,12 +692,13 @@ pub(crate) struct Active {
 impl Active {
     /// A cursor in `conv` on no node yet; [`Active::enter`] puts it on the start node and announces
     /// it, as it does every later node.
-    pub(crate) fn new(conv: &str) -> Self {
+    pub(crate) fn new(conv: &str, delivery: Delivery) -> Self {
         Self {
             conv: conv.to_owned(),
             node: String::new(),
             presented: false,
             advance_at: 0.0,
+            delivery,
             seen: HashSet::new(),
             presses: 0,
             lines_entered: 0,
@@ -783,11 +808,11 @@ pub(crate) fn open_conversation(
     mut entered: MessageWriter<DialogueNodeEntered>,
 ) {
     // One conversation at a time; take the first request and drain the rest of the queue.
-    let id = {
+    let (id, delivery) = {
         let Some(start) = starts.read().next() else {
             return;
         };
-        start.id.clone()
+        (start.id.clone(), start.delivery)
     };
     starts.clear();
     if active.is_some() {
@@ -797,10 +822,29 @@ pub(crate) fn open_conversation(
         warn!("bevy_speech_bubbles: no conversation '{id}'");
         return;
     };
-    let mut cursor = Active::new(&id);
+    if delivery == Delivery::Unattended {
+        // The rule does not matter here: only the shape is asked (no choice, no loop).
+        match script.cost(&id, PressRule::Timed) {
+            Ok(c) if !c.branches => {}
+            Ok(_) => {
+                warn!(
+                    "bevy_speech_bubbles: '{id}' has a choice, which nobody can pick in an \
+                     unattended delivery; not starting it"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!("bevy_speech_bubbles: not starting '{id}' unattended: {e}");
+                return;
+            }
+        }
+    }
+    let mut cursor = Active::new(&id, delivery);
     cursor.enter(&conv.start, &script, &mut entered);
     commands.insert_resource(cursor);
-    commands.insert_resource(ConversationLock);
+    if delivery == Delivery::Modal {
+        commands.insert_resource(ConversationLock);
+    }
 }
 
 /// Present the current node as world balloons. The dialog box has its own presenter.
@@ -993,7 +1037,9 @@ pub(crate) fn present_current(
 
 /// A line is read: `Space`, `Enter`, the numpad `Enter` or a left click advance it. In dialog-box mode
 /// the first press while the typewriter is still running completes the line instead (and a line never
-/// auto-advances); in balloon mode a line also advances once its dwell time is up.
+/// auto-advances); in balloon mode a line also advances once its dwell time is up. A
+/// [`Delivery::Unattended`] line reads no input at all and advances once it is typed and has been up
+/// for its [`dwell_secs`], in either presenter.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_line(
     mut commands: Commands,
@@ -1015,19 +1061,34 @@ pub(crate) fn advance_line(
         return;
     }
     // Only Line nodes advance here (choices are resolved by a pick).
-    let next = match script
+    let (next, text) = match script
         .conversation(&active.conv)
         .and_then(|c| c.nodes.get(&active.node))
     {
-        Some(Node::Line { next, .. }) => next.clone(),
+        Some(Node::Line { next, text, .. }) => (next.clone(), text),
         _ => return,
     };
-    // Only a press the dialog actually uses is cleared; a timed-out balloon line uses none.
-    let mut pressed = mouse.get_just_pressed().any(|b| *b == MouseButton::Left);
-    for key in [KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space] {
-        pressed |= keys.just_pressed(key);
+    let now = time.elapsed_secs();
+    let unattended = active.delivery == Delivery::Unattended;
+    if unattended {
+        // Nobody presses: the line's reading time starts once the box has typed it.
+        if typewriters.iter().any(|t| !t.complete()) {
+            return;
+        }
+        if active.advance_at == f32::INFINITY {
+            active.advance_at = now + dwell_secs(text);
+        }
     }
-    let timed_out = *presenter == Presenter::Balloons && time.elapsed_secs() >= active.advance_at;
+    // Only a press the dialog actually uses is cleared; a timed-out balloon line uses none, and an
+    // unattended conversation reads none: the keys stay the game's.
+    let mut pressed = false;
+    if !unattended {
+        pressed = mouse.get_just_pressed().any(|b| *b == MouseButton::Left);
+        for key in [KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space] {
+            pressed |= keys.just_pressed(key);
+        }
+    }
+    let timed_out = (*presenter == Presenter::Balloons || unattended) && now >= active.advance_at;
     if !pressed && !timed_out {
         return;
     }
@@ -1257,11 +1318,16 @@ pub(crate) fn sync_progress(
         return;
     };
     let cps = skin.map_or(crate::DEFAULT_CHARS_PER_SECOND, |s| s.chars_per_second);
-    let rule = PressRule::new(*presenter, cps);
+    // An unattended conversation takes no press at all: every line is timed.
+    let rule = match active.delivery {
+        Delivery::Modal => PressRule::new(*presenter, cps),
+        Delivery::Unattended => PressRule::Timed,
+    };
     let typing = *presenter == Presenter::DialogBox && typewriters.iter().any(|t| !t.complete());
     let (lines_left, presses_to_close) = remaining(conv, &active, typing, rule);
     let now = ConversationProgress {
         conversation: active.conv.clone(),
+        delivery: active.delivery,
         node: active.node.clone(),
         line: active.lines_entered,
         lines_left,
@@ -1692,7 +1758,7 @@ mod tests {
             node: node.into(),
             presented: true,
             advance_at: f32::INFINITY,
-            ..Active::new("t")
+            ..Active::new("t", Delivery::Modal)
         });
     }
 

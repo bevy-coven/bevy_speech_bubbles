@@ -68,9 +68,9 @@ pub use balloon::{
 };
 pub use conversation::{
     Bark, BarkQueue, BarkSettings, Choice, ChoicePicked, Conversation, ConversationCost,
-    ConversationEnded, ConversationLock, ConversationProgress, CostError, DialogueNodeEntered,
-    DialogueScript, Node, Presenter, PressRule, SkipConversation, Speaker, Speakers,
-    StartConversation, validate_script,
+    ConversationEnded, ConversationLock, ConversationProgress, CostError, Delivery,
+    DialogueNodeEntered, DialogueScript, Node, Presenter, PressRule, SkipConversation, Speaker,
+    Speakers, StartConversation, validate_script,
 };
 pub use dialog_box::{ChoiceFocus, DEFAULT_CHARS_PER_SECOND, DIALOG_Z, DialogSkin};
 pub use plugin::{DialogInputSet, SpeechBubblesPlugin};
