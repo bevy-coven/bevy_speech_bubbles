@@ -13,6 +13,8 @@ is cited but not in the corpus. Add a row when a pass reads a new source; mark w
 | `GameAIPro2_Chapter11_Smart_Zones_to_Create_the_Ambience_of_Life` (also `gameaipro2-ch11-smart-zones-create-ambience-life`) | Game AI Pro 2 ch. 11, *Smart Zones to Create the Ambience of Life* | ambient "living scenes"; roles for main, supporting and extra characters |
 | `GameAIPro2_Chapter28_Modeling_Perception_and_Awareness_in_Tom_Clancy's_Splinter_` | Game AI Pro 2 ch. 28, Splinter Cell perception | NPCs announcing what they noticed |
 | `Procedural Storytelling in Game Design -- Anna's Archive` | Short & Adams (eds.), *Procedural Storytelling in Game Design* | narrative structure, environmental text |
+| `Game Engine Architecture, Third Edition, 3rd Edition -- Jason Gregory -- …` | Gregory, *Game Engine Architecture* 3e, §14.6.2.3–14.6.2.4 (Naughty Dog's dialog system) | voice-id lookup per character; a character asked to speak while speaking stops the old line (`barks.md`) |
+| `10.1017_s0047404500001019` | Schegloff, *Overlapping talk and the organization of turn-taking for conversation*, Language in Society 2000 | "one at a time"; turns go to parties, not to each co-incumbent (`barks.md`, speaker aliases) |
 
 ## Comics lettering and speech balloons (model)
 
