@@ -51,3 +51,22 @@ speakers.alias("society:7", "person:7");
 Every lookup then reads the target's registration: a bark for `society:7` floats over Mara's head and takes its turn in the one bark queue, a balloon-mode line by `society:7` floats there too, and the dialog box shows Mara's name and portrait. An alias resolves one hop (a chain `a → b → c` reads `b`'s registration), wins over a registration of the alias key itself, and goes silent while its target is absent: `speakers.0.remove("person:7")` drops the aliased barks like an unknown key's until the target is registered again. A bark resolves its alias when it is queued, so re-pointing an alias never moves a bark already waiting. `Speakers::unalias` forgets one.
 
 Without an alias, two keys registered on one entity still show one balloon at a time over that head: a new bark replaces the one over its entity, and the queue's gap spaces them.
+
+## How many presses: progress, cost and skip
+
+While a conversation runs, the resource `ConversationProgress` exists (so `Option<Res<ConversationProgress>>` answers "is a conversation up"). It names the node, the line number, the lines left to the end or the next choice, whether the box is still typing, and `presses_to_close()`: the presses that close it from here, `None` while a choice lies ahead. A typed boxed line costs two presses (one completes it, one advances), a box with `chars_per_second <= 0` one, a timed balloon line none; a choice costs its pick, plus one while a boxed prompt types. The count is for a player who confirms as soon as each node is up, so it is an upper bound: pressing exactly that many times closes the conversation, one fewer does not.
+
+Before a conversation starts, ask the script:
+
+```rust,ignore
+let rule = PressRule::new(*presenter, skin.chars_per_second);
+match script.cost("greet", rule) {
+    Ok(c) => info!("{} lines, at most {} presses, branches: {}", c.lines, c.presses, c.branches),
+    Err(e) => warn!("{e}"), // an unknown id, a missing node, or a loop (`CostError::Unbounded`)
+}
+if script.fits("greet", 3, rule) { starts.write(StartConversation { id: "greet".into() }); }
+```
+
+With a choice, `lines` and `presses` are each the maximum over every path, so a gate on them is a guarantee.
+
+`SkipConversation` finishes the running conversation without the player: it advances node by node, writing `DialogueNodeEntered` for each as presses would, and ends it, or stops at the next choice and leaves the pick. `ConversationEnded` says what the player was there for on every way out: `nodes_seen` (distinct nodes entered), `presses` (presses the conversation used) and `skipped`.
