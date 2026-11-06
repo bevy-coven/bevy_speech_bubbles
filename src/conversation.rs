@@ -197,8 +197,64 @@ pub struct Speaker {
 /// A registered speaker without an `entity` is a narrator and is skipped quietly; a key that is not here
 /// at all is skipped with a `warn!` naming it (a bark's once per key, a balloon-mode line's once per
 /// node), because nothing but a misspelt or not-yet-registered key explains it.
+///
+/// # Aliases
+///
+/// Two keys may be one person: a game registers `person:7` and a simulation addresses the same
+/// villager as `society:7`. [`Speakers::alias`] says so once, and every lookup in the crate (a bark, a
+/// balloon-mode line, the dialog box's name tag and portrait) then reads the target's registration, so
+/// the villager has one head, one name and one portrait whichever key a line names. Turns go to the
+/// party, not to each name it is addressed by (Schegloff 2000, DOI 10.1017/S0047404500001019).
+///
+/// ```
+/// # use bevy_speech_bubbles::{Speaker, Speakers};
+/// let mut speakers = Speakers::default();
+/// speakers.0.insert("person:7".into(), Speaker { name: "Mara".into(), ..Default::default() });
+/// speakers.alias("society:7", "person:7");
+/// assert_eq!(speakers.get("society:7").map(|s| s.name.as_str()), Some("Mara"));
+/// // Removing the target silences the alias; registering it again resumes it.
+/// speakers.0.remove("person:7");
+/// assert!(speakers.get("society:7").is_none());
+/// ```
 #[derive(Resource, Debug, Clone, Default)]
-pub struct Speakers(pub HashMap<String, Speaker>);
+pub struct Speakers(
+    pub HashMap<String, Speaker>,
+    /// Alias key → target key. Private: [`Speakers::alias`] and [`Speakers::unalias`] edit it.
+    HashMap<String, String>,
+);
+
+impl Speakers {
+    /// Make `alias` speak as `target`: a line or bark naming `alias` resolves to `target`'s
+    /// registration (its entity, name and portrait). Re-aliasing a key re-points it.
+    ///
+    /// - **One hop.** The target is read from the key map and never through another alias, so a
+    ///   chain `a → b → c` resolves `a` to `b`'s registration and a cycle cannot form.
+    /// - **The alias wins** over a registration of `alias` itself: it is the host saying this key is
+    ///   someone else.
+    /// - **A missing target silences the alias** (its barks are dropped like an unknown key's, with
+    ///   the same `warn!` naming the target) until `target` is registered again.
+    /// - A bark resolves its alias when it is queued, so re-pointing an alias never moves a bark that
+    ///   is already waiting for its turn.
+    pub fn alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
+        self.1.insert(alias.into(), target.into());
+    }
+
+    /// Forget `alias`, returning the target it pointed at. The key resolves through its own
+    /// registration again, if it has one.
+    pub fn unalias(&mut self, alias: &str) -> Option<String> {
+        self.1.remove(alias)
+    }
+
+    /// The key `key` speaks as: its alias target, or itself.
+    pub fn resolve_key<'a>(&'a self, key: &'a str) -> &'a str {
+        self.1.get(key).map_or(key, String::as_str)
+    }
+
+    /// The registration `key` speaks as, through its alias if it has one (one hop).
+    pub fn get(&self, key: &str) -> Option<&Speaker> {
+        self.0.get(self.resolve_key(key))
+    }
+}
 
 /// How a conversation's lines are shown. Set by the host; one rule for the whole game.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -392,8 +448,13 @@ enum Resolved {
     Unknown,
 }
 
+/// What `key` means, through its alias if it has one (a conversation line's lookup).
 fn resolve_speaker(speakers: &Speakers, key: &str) -> Resolved {
-    match speakers.0.get(key) {
+    resolve_registration(speakers.get(key))
+}
+
+fn resolve_registration(speaker: Option<&Speaker>) -> Resolved {
+    match speaker {
         Some(Speaker {
             entity: Some(entity),
             ..
@@ -817,15 +878,23 @@ pub(crate) fn finish(
 
 /// Queue every incoming [`Bark`]. Runs before [`release_bark`] so a bark generated this frame is a
 /// candidate this frame — the queue adds pacing, never a frame of latency to an idle world.
+///
+/// A bark's speaker is resolved through [`Speakers::alias`] here, once, so the queue holds only real
+/// keys and re-pointing an alias does not move a bark already waiting.
 pub(crate) fn queue_barks(
     time: Res<Time<Real>>,
     settings: Res<BarkSettings>,
+    speakers: Res<Speakers>,
     mut barks: MessageReader<Bark>,
     mut queue: ResMut<BarkQueue>,
 ) {
     let now = time.elapsed_secs();
     for bark in barks.read() {
-        queue.push(bark.clone(), now, &settings);
+        let mut bark = bark.clone();
+        if let Some(target) = speakers.1.get(&bark.speaker) {
+            bark.speaker = target.clone();
+        }
+        queue.push(bark, now, &settings);
     }
 }
 
@@ -862,7 +931,8 @@ pub(crate) fn release_bark(
         warn_once!("bevy_speech_bubbles: barks need a BubbleAssets resource; dropping them");
         return;
     };
-    let owner = match resolve_speaker(&speakers, &bark.speaker) {
+    // The key was resolved through its alias when it was queued: read it directly, never a second hop.
+    let owner = match resolve_registration(speakers.0.get(&bark.speaker)) {
         Resolved::Head(owner) => owner,
         // Nothing was shown, so the gap is not started — the next bark is eligible immediately. A
         // narrator's silence is documented; an unregistered key is warned about, once per key.

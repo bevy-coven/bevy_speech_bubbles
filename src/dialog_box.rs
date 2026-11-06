@@ -221,7 +221,7 @@ pub(crate) fn present_dialog_box(
         }
     };
 
-    let (name, portrait) = match speakers.0.get(&shown.speaker) {
+    let (name, portrait) = match speakers.get(&shown.speaker) {
         Some(s) => (s.name.clone(), s.portrait.clone()),
         None => {
             warn!(
