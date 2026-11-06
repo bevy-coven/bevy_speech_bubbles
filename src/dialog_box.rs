@@ -94,7 +94,7 @@ pub(crate) struct Typewriter {
 }
 
 impl Typewriter {
-    fn complete(&self) -> bool {
+    pub(crate) fn complete(&self) -> bool {
         self.shown >= self.total
     }
 }
@@ -187,8 +187,7 @@ pub(crate) fn present_dialog_box(
 
     let Some(skin) = skin else {
         error!("bevy_speech_bubbles: Presenter::DialogBox needs a DialogSkin");
-        let id = active.conv.clone();
-        finish(&mut commands, &existing, &mut ended, id);
+        finish(&mut commands, &existing, &mut ended, &active, false);
         return;
     };
     let shown = match script
@@ -215,8 +214,7 @@ pub(crate) fn present_dialog_box(
                 "bevy_speech_bubbles: node '{}' of '{}' is missing; ending",
                 active.node, active.conv
             );
-            let id = active.conv.clone();
-            finish(&mut commands, &existing, &mut ended, id);
+            finish(&mut commands, &existing, &mut ended, &active, false);
             return;
         }
     };
@@ -520,7 +518,7 @@ pub(crate) fn caret_blink(
 pub(crate) fn choice_focus_input(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     presenter: Res<Presenter>,
-    active: Option<Res<Active>>,
+    active: Option<ResMut<Active>>,
     script: Res<DialogueScript>,
     mut focus: ResMut<ChoiceFocus>,
     mut typewriters: Query<&mut Typewriter>,
@@ -529,7 +527,7 @@ pub(crate) fn choice_focus_input(
     if *presenter != Presenter::DialogBox {
         return;
     }
-    let Some(active) = active else { return };
+    let Some(mut active) = active else { return };
     if !active.presented {
         return;
     }
@@ -555,7 +553,13 @@ pub(crate) fn choice_focus_input(
     for key in [KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space] {
         confirm |= keys.clear_just_pressed(key);
     }
-    if confirm && !complete_typing(&mut typewriters) {
+    if !confirm {
+        return;
+    }
+    if complete_typing(&mut typewriters) {
+        active.presses += 1;
+    } else {
+        // The pick's press is counted where it resolves (`resolve_choice`), like a digit's or a click's.
         picked.write(ChoicePicked {
             index: focus.0.min(n - 1),
         });

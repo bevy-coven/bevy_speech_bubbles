@@ -118,6 +118,200 @@ impl DialogueScript {
     }
 }
 
+/// The presses one node costs the player, by how the host shows lines. Built from the host's own
+/// settings with [`PressRule::new`], so a cost asked before a conversation starts is the cost the
+/// runtime will charge.
+///
+/// The count is that of a player who confirms (`Space`, `Enter`, a click) as soon as each node is up:
+/// a press that meets a running typewriter completes the line instead of advancing it, so a typed
+/// boxed line costs two. A press that arrives after a line has finished typing on its own saves one,
+/// and a number key picks a choice whose prompt is still typing, so the counts are upper bounds a
+/// host can gate on, never estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressRule {
+    /// [`Presenter::Balloons`]: a line advances on its own after its dwell (no press), a choice
+    /// waits for its pick (one).
+    Timed,
+    /// [`Presenter::DialogBox`]: every line waits for a press, and with a running typewriter one
+    /// more press first completes a line (or a choice's prompt) that has text.
+    Boxed {
+        /// `true` when the box types its text ([`crate::DialogSkin::chars_per_second`] `> 0`).
+        typewriter: bool,
+    },
+}
+
+impl PressRule {
+    /// The rule for `presenter` with a typewriter of `chars_per_second` (a value `<= 0` shows the
+    /// whole line at once, as the dialog box does).
+    pub fn new(presenter: Presenter, chars_per_second: f32) -> Self {
+        match presenter {
+            Presenter::Balloons => Self::Timed,
+            Presenter::DialogBox => Self::Boxed {
+                typewriter: chars_per_second > 0.0,
+            },
+        }
+    }
+
+    /// The presses `node` costs from before it is on screen.
+    fn node_presses(self, node: &Node) -> usize {
+        let (text, is_choice) = match node {
+            Node::Line { text, .. } => (text, false),
+            Node::Choice { prompt, .. } => (prompt, true),
+        };
+        match self {
+            Self::Timed => usize::from(is_choice),
+            Self::Boxed { typewriter } => 1 + usize::from(typewriter && !text.is_empty()),
+        }
+    }
+}
+
+/// What a conversation costs the player from its start node: [`DialogueScript::cost`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConversationCost {
+    /// Most [`Node::Line`]s on any path from the start to an end.
+    pub lines: usize,
+    /// Most presses on any path from the start to an end, by the [`PressRule`] asked with. With a
+    /// choice this is the maximum over its branches (it and `lines` may come from different ones), so
+    /// a gate on it is a guarantee.
+    pub presses: usize,
+    /// `true` when a [`Node::Choice`] is reachable, so the conversation has more than one path.
+    pub branches: bool,
+}
+
+/// Why [`DialogueScript::cost`] has no number to give.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CostError {
+    /// No conversation of that id in the script.
+    UnknownConversation(String),
+    /// A `start`, `next` or option names a node the conversation does not have
+    /// ([`validate_script`] refuses such a script).
+    MissingNode { conversation: String, node: String },
+    /// The graph returns to `node`, so a player can be kept in it for any number of presses.
+    Unbounded { conversation: String, node: String },
+}
+
+impl std::fmt::Display for CostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownConversation(id) => write!(f, "dialogue: no conversation '{id}'"),
+            Self::MissingNode { conversation, node } => {
+                write!(
+                    f,
+                    "dialogue: '{conversation}' names a missing node '{node}'"
+                )
+            }
+            Self::Unbounded { conversation, node } => write!(
+                f,
+                "dialogue: '{conversation}' loops back to node '{node}', so its cost is unbounded"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CostError {}
+
+/// The node ids `node` can move to.
+fn successors(node: &Node) -> impl Iterator<Item = &str> {
+    let (line_next, options) = match node {
+        Node::Line { next, .. } => (next.as_deref(), &[][..]),
+        Node::Choice { options, .. } => (None, options.as_slice()),
+    };
+    line_next
+        .into_iter()
+        .chain(options.iter().map(|o| o.next.as_str()))
+}
+
+impl DialogueScript {
+    /// What conversation `id` costs the player from its start, under `rule`, computed from the script
+    /// alone, so a host can decide before it starts it (open the box only if it is short enough).
+    ///
+    /// With a choice, `lines` and `presses` are each the maximum over every path to an end. A graph
+    /// that can return to a node is [`CostError::Unbounded`], an unknown id
+    /// [`CostError::UnknownConversation`]. Walks each node once (an explicit stack, so a long
+    /// conversation cannot exhaust the call stack).
+    pub fn cost(&self, id: &str, rule: PressRule) -> Result<ConversationCost, CostError> {
+        let conv = self
+            .conversation(id)
+            .ok_or_else(|| CostError::UnknownConversation(id.to_owned()))?;
+        let node_of = |nid: &str| {
+            conv.nodes.get(nid).ok_or_else(|| CostError::MissingNode {
+                conversation: id.to_owned(),
+                node: nid.to_owned(),
+            })
+        };
+        // Longest path in a DAG by post-order: a node's (lines, presses) once all its successors are
+        // known. `Visiting` on a node met again means a back edge, i.e. a loop.
+        enum Mark {
+            Visiting,
+            Done(usize, usize),
+        }
+        let mut marks: HashMap<&str, Mark> = HashMap::new();
+        let mut stack: Vec<(&str, bool)> = vec![(conv.start.as_str(), false)];
+        let mut branches = false;
+        while let Some((nid, expanded)) = stack.pop() {
+            let node = node_of(nid)?;
+            if expanded {
+                let (mut lines, mut presses) = (0, 0);
+                for next in successors(node) {
+                    if let Some(Mark::Done(l, p)) = marks.get(next) {
+                        lines = lines.max(*l);
+                        presses = presses.max(*p);
+                    }
+                }
+                let own_line = usize::from(matches!(node, Node::Line { .. }));
+                marks.insert(
+                    nid,
+                    Mark::Done(lines + own_line, presses + rule.node_presses(node)),
+                );
+                continue;
+            }
+            match marks.get(nid) {
+                Some(Mark::Done(..)) => continue,
+                Some(Mark::Visiting) => {
+                    return Err(CostError::Unbounded {
+                        conversation: id.to_owned(),
+                        node: nid.to_owned(),
+                    });
+                }
+                None => {}
+            }
+            branches |= matches!(node, Node::Choice { .. });
+            marks.insert(nid, Mark::Visiting);
+            stack.push((nid, true));
+            for next in successors(node) {
+                match marks.get(next) {
+                    Some(Mark::Visiting) => {
+                        return Err(CostError::Unbounded {
+                            conversation: id.to_owned(),
+                            node: next.to_owned(),
+                        });
+                    }
+                    Some(Mark::Done(..)) => {}
+                    None => stack.push((next, false)),
+                }
+            }
+        }
+        match marks.get(conv.start.as_str()) {
+            Some(Mark::Done(lines, presses)) => Ok(ConversationCost {
+                lines: *lines,
+                presses: *presses,
+                branches,
+            }),
+            _ => Err(CostError::MissingNode {
+                conversation: id.to_owned(),
+                node: conv.start.clone(),
+            }),
+        }
+    }
+
+    /// `true` when conversation `id` can be read to its end in at most `presses` presses under
+    /// `rule`, on every path: the predicate a host writes before it opens a conversation. An unknown,
+    /// malformed or looping conversation does not fit; [`DialogueScript::cost`] says why.
+    pub fn fits(&self, id: &str, presses: usize, rule: PressRule) -> bool {
+        self.cost(id, rule).is_ok_and(|c| c.presses <= presses)
+    }
+}
+
 /// Validate a parsed script: every conversation's `start` exists, every `next`/option target
 /// resolves, choices are non-empty, and speakers are named. One path: a malformed script is a loud
 /// error at load, never a half-broken conversation at runtime.
@@ -279,10 +473,56 @@ pub struct ChoicePicked {
     pub index: usize,
 }
 
-/// A conversation ran to its end.
-#[derive(Message, Debug, Clone)]
+/// A conversation closed, by any way out: its last line, a choice into an end, a [`SkipConversation`],
+/// or a refusal (a missing [`crate::DialogSkin`] or [`crate::BubbleAssets`], a missing node, a choice
+/// with no head in balloon mode). Written exactly once per conversation, and it says what the player
+/// was there for, so a host's node effects can tell a read conversation from a skipped one.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct ConversationEnded {
     pub id: String,
+    /// Distinct nodes the cursor entered, the start included (a node entered twice counts once).
+    pub nodes_seen: usize,
+    /// Presses the conversation used: confirms and clicks that completed or advanced a line, and
+    /// resolved picks (a number key, a click, the box's focus, or a host-written [`ChoicePicked`]).
+    pub presses: usize,
+    /// `true` when a [`SkipConversation`] closed it.
+    pub skipped: bool,
+}
+
+/// Finish the running conversation without the player: complete the line on screen and advance node
+/// by node, writing [`DialogueNodeEntered`] for every node entered exactly as presses would, until the
+/// conversation ends (one [`ConversationEnded`], `skipped: true`) or reaches a [`Node::Choice`], which
+/// it presents and leaves for a pick. Ignored when no conversation runs. The speakers, the script and
+/// the bark queue are untouched. For a test, a replay or an agent that must clear a card in one call.
+#[derive(Message, Debug, Clone, Copy, Default)]
+pub struct SkipConversation;
+
+/// Where the running conversation stands; present exactly while one runs (inserted when it opens,
+/// removed when it ends), so `Option<Res<ConversationProgress>>` answers "is a conversation up".
+/// Updated in `Update` after the typewriter ticks, so it is current for any system that runs later in
+/// the frame.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct ConversationProgress {
+    pub conversation: String,
+    /// The node the cursor is on.
+    pub node: String,
+    /// Lines entered so far, the one on screen included (1 on the first line).
+    pub line: u32,
+    /// Lines from the cursor to the end or to the next choice, the current one included.
+    pub lines_left: u32,
+    /// `true` while the dialog box's typewriter is still revealing the current node.
+    pub typing: bool,
+    presses_to_close: Option<u32>,
+}
+
+impl ConversationProgress {
+    /// The presses that close the conversation from here, counted as [`PressRule`] counts them (a
+    /// typing line takes one press to complete and one to advance; a timed balloon line takes none).
+    /// `None` while a choice lies ahead (or is on screen), since the path depends on the pick, or when
+    /// the remaining lines loop.
+    pub fn presses_to_close(&self) -> Option<u32> {
+        self.presses_to_close
+    }
 }
 
 /// The conversation cursor moved onto `node` of `conversation` — at the start node, after a line
@@ -417,6 +657,53 @@ pub(crate) struct Active {
     pub(crate) presented: bool,
     /// Real time at which a [`Presenter::Balloons`] line auto-advances (lines only).
     pub(crate) advance_at: f32,
+    /// Distinct nodes entered ([`ConversationEnded::nodes_seen`]).
+    pub(crate) seen: HashSet<String>,
+    /// Presses used ([`ConversationEnded::presses`]).
+    pub(crate) presses: usize,
+    /// Line nodes entered ([`ConversationProgress::line`]).
+    pub(crate) lines_entered: u32,
+}
+
+impl Active {
+    /// A cursor in `conv` on no node yet; [`Active::enter`] puts it on the start node and announces
+    /// it, as it does every later node.
+    pub(crate) fn new(conv: &str) -> Self {
+        Self {
+            conv: conv.to_owned(),
+            node: String::new(),
+            presented: false,
+            advance_at: 0.0,
+            seen: HashSet::new(),
+            presses: 0,
+            lines_entered: 0,
+        }
+    }
+
+    /// Move the cursor onto `node` and announce it: the one way a node is entered (the start, a line
+    /// advancing, a pick, a skip).
+    pub(crate) fn enter(
+        &mut self,
+        node: &str,
+        script: &DialogueScript,
+        entered: &mut MessageWriter<DialogueNodeEntered>,
+    ) {
+        if matches!(
+            script
+                .conversation(&self.conv)
+                .and_then(|c| c.nodes.get(node)),
+            Some(Node::Line { .. })
+        ) {
+            self.lines_entered += 1;
+        }
+        self.seen.insert(node.to_owned());
+        self.node = node.to_owned();
+        self.presented = false;
+        entered.write(DialogueNodeEntered {
+            conversation: self.conv.clone(),
+            node: node.to_owned(),
+        });
+    }
 }
 
 /// Marks everything owned by the current conversation (balloons, the dialog box), so a node
@@ -510,16 +797,9 @@ pub(crate) fn open_conversation(
         warn!("bevy_speech_bubbles: no conversation '{id}'");
         return;
     };
-    commands.insert_resource(Active {
-        conv: id.clone(),
-        node: conv.start.clone(),
-        presented: false,
-        advance_at: 0.0,
-    });
-    entered.write(DialogueNodeEntered {
-        conversation: id.clone(),
-        node: conv.start.clone(),
-    });
+    let mut cursor = Active::new(&id);
+    cursor.enter(&conv.start, &script, &mut entered);
+    commands.insert_resource(cursor);
     commands.insert_resource(ConversationLock);
 }
 
@@ -556,8 +836,7 @@ pub(crate) fn present_current(
 
     let Some(assets) = assets else {
         error!("bevy_speech_bubbles: Presenter::Balloons needs a BubbleAssets resource");
-        let id = active.conv.clone();
-        finish(&mut commands, &existing, &mut ended, id);
+        finish(&mut commands, &existing, &mut ended, &active, false);
         return;
     };
     let Some(node) = script
@@ -568,8 +847,7 @@ pub(crate) fn present_current(
             "bevy_speech_bubbles: node '{}' of '{}' is missing; ending",
             active.node, active.conv
         );
-        let id = active.conv.clone();
-        finish(&mut commands, &existing, &mut ended, id);
+        finish(&mut commands, &existing, &mut ended, &active, false);
         return;
     };
 
@@ -626,8 +904,7 @@ pub(crate) fn present_current(
                      ('{speaker}' has none); ending",
                     active.node
                 );
-                let id = active.conv.clone();
-                finish(&mut commands, &existing, &mut ended, id);
+                finish(&mut commands, &existing, &mut ended, &active, false);
                 return;
             };
             let prompt_height_px = spawn_line_bubble(
@@ -759,23 +1036,14 @@ pub(crate) fn advance_line(
         for key in [KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space] {
             keys.clear_just_pressed(key);
         }
+        active.presses += 1;
         if complete_typing(&mut typewriters) {
             return;
         }
     }
     match next {
-        Some(n) => {
-            entered.write(DialogueNodeEntered {
-                conversation: active.conv.clone(),
-                node: n.clone(),
-            });
-            active.node = n;
-            active.presented = false;
-        }
-        None => {
-            let id = active.conv.clone();
-            finish(&mut commands, &existing, &mut ended, id);
-        }
+        Some(n) => active.enter(&n, &script, &mut entered),
+        None => finish(&mut commands, &existing, &mut ended, &active, false),
     }
 }
 
@@ -852,28 +1120,162 @@ pub(crate) fn resolve_choice(
         _ => return,
     };
     if let Some(n) = next {
-        entered.write(DialogueNodeEntered {
-            conversation: active.conv.clone(),
-            node: n.clone(),
-        });
-        active.node = n;
-        active.presented = false;
+        active.presses += 1;
+        active.enter(&n, &script, &mut entered);
     }
 }
 
-/// Tear down the conversation: despawn its balloons / box, drop the lock and cursor, say it ended.
+/// Tear down the conversation: despawn its balloons / box, drop the lock, the cursor and the
+/// progress, and say it ended (with what was seen). Every way out passes here, so it ends once.
 pub(crate) fn finish(
     commands: &mut Commands,
     existing: &Query<Entity, With<ConversationEntity>>,
     ended: &mut MessageWriter<ConversationEnded>,
-    id: String,
+    active: &Active,
+    skipped: bool,
 ) {
     for e in existing {
         commands.entity(e).despawn();
     }
     commands.remove_resource::<Active>();
     commands.remove_resource::<ConversationLock>();
-    ended.write(ConversationEnded { id });
+    commands.remove_resource::<ConversationProgress>();
+    ended.write(ConversationEnded {
+        id: active.conv.clone(),
+        nodes_seen: active.seen.len(),
+        presses: active.presses,
+        skipped,
+    });
+}
+
+/// Run a [`SkipConversation`]: advance line by line, announcing each node, to the end (closing it) or
+/// to the next choice (left to be presented and picked). A line graph that loops stops where it would
+/// re-enter a node it entered during this skip, so a skip always terminates.
+pub(crate) fn skip_conversation(
+    mut commands: Commands,
+    mut skips: MessageReader<SkipConversation>,
+    active: Option<ResMut<Active>>,
+    script: Res<DialogueScript>,
+    existing: Query<Entity, With<ConversationEntity>>,
+    mut ended: MessageWriter<ConversationEnded>,
+    mut entered: MessageWriter<DialogueNodeEntered>,
+) {
+    if skips.read().next().is_none() {
+        return;
+    }
+    skips.clear();
+    let Some(mut active) = active else { return };
+    let mut passed: HashSet<String> = HashSet::new();
+    loop {
+        let next = match script
+            .conversation(&active.conv)
+            .and_then(|c| c.nodes.get(&active.node))
+        {
+            Some(Node::Line { next, .. }) => next.clone(),
+            // A choice waits for its pick; `present_*` puts it up if it is not on screen yet.
+            Some(Node::Choice { .. }) => return,
+            None => {
+                warn!(
+                    "bevy_speech_bubbles: node '{}' of '{}' is missing; ending",
+                    active.node, active.conv
+                );
+                finish(&mut commands, &existing, &mut ended, &active, true);
+                return;
+            }
+        };
+        passed.insert(active.node.clone());
+        match next {
+            Some(n) if passed.contains(&n) => {
+                warn!(
+                    "bevy_speech_bubbles: skipping '{}' loops back to node '{n}'; stopping there",
+                    active.conv
+                );
+                active.enter(&n, &script, &mut entered);
+                return;
+            }
+            Some(n) => active.enter(&n, &script, &mut entered),
+            None => {
+                finish(&mut commands, &existing, &mut ended, &active, true);
+                return;
+            }
+        }
+    }
+}
+
+/// The presses and lines from the cursor to the end, or `None` presses when a choice lies ahead (or
+/// the lines loop). The current node costs what [`PressRule`] charges a node not yet on screen, or,
+/// once presented, one press plus one more while `typing`.
+fn remaining(
+    conv: &Conversation,
+    active: &Active,
+    typing: bool,
+    rule: PressRule,
+) -> (u32, Option<u32>) {
+    let mut lines = 0u32;
+    let mut presses = Some(0u32);
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut cursor = Some(active.node.as_str());
+    let mut first = true;
+    while let Some(nid) = cursor {
+        if !visited.insert(nid) {
+            return (lines, None);
+        }
+        let Some(node) = conv.nodes.get(nid) else {
+            return (lines, None);
+        };
+        let Node::Line { next, .. } = node else {
+            return (lines, None);
+        };
+        let cost = if first && active.presented {
+            match rule {
+                PressRule::Timed => 0,
+                PressRule::Boxed { .. } => 1 + u32::from(typing),
+            }
+        } else {
+            u32::try_from(rule.node_presses(node)).unwrap_or(u32::MAX)
+        };
+        first = false;
+        lines += 1;
+        presses = presses.map(|p| p.saturating_add(cost));
+        cursor = next.as_deref();
+    }
+    (lines, presses)
+}
+
+/// Keep [`ConversationProgress`] current. `Update`, after the typewriter ticks.
+pub(crate) fn sync_progress(
+    mut commands: Commands,
+    active: Option<Res<Active>>,
+    script: Res<DialogueScript>,
+    presenter: Res<Presenter>,
+    skin: Option<Res<crate::DialogSkin>>,
+    typewriters: Query<&Typewriter>,
+    progress: Option<ResMut<ConversationProgress>>,
+) {
+    let Some(active) = active else { return };
+    let Some(conv) = script.conversation(&active.conv) else {
+        return;
+    };
+    let cps = skin.map_or(crate::DEFAULT_CHARS_PER_SECOND, |s| s.chars_per_second);
+    let rule = PressRule::new(*presenter, cps);
+    let typing = *presenter == Presenter::DialogBox && typewriters.iter().any(|t| !t.complete());
+    let (lines_left, presses_to_close) = remaining(conv, &active, typing, rule);
+    let now = ConversationProgress {
+        conversation: active.conv.clone(),
+        node: active.node.clone(),
+        line: active.lines_entered,
+        lines_left,
+        typing,
+        presses_to_close,
+    };
+    match progress {
+        Some(mut p) => {
+            if *p != now {
+                *p = now;
+            }
+        }
+        None => commands.insert_resource(now),
+    }
 }
 
 /// Queue every incoming [`Bark`]. Runs before [`release_bark`] so a bark generated this frame is a
@@ -1287,10 +1689,10 @@ mod tests {
     fn park(app: &mut App, node: &str) {
         app.insert_resource(script());
         app.insert_resource(Active {
-            conv: "t".into(),
             node: node.into(),
             presented: true,
             advance_at: f32::INFINITY,
+            ..Active::new("t")
         });
     }
 

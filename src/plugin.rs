@@ -9,8 +9,9 @@ use bevy::prelude::*;
 use crate::balloon::{BalloonScale, DefaultBalloonSkin, expire_bubbles, track_bubbles};
 use crate::conversation::{
     Bark, BarkQueue, BarkSettings, ChoicePicked, ConversationEnded, DialogueNodeEntered,
-    DialogueScript, Presenter, Speakers, StartConversation, advance_line, choice_hotkeys,
-    open_conversation, present_current, queue_barks, release_bark, resolve_choice,
+    DialogueScript, Presenter, SkipConversation, Speakers, StartConversation, advance_line,
+    choice_hotkeys, open_conversation, present_current, queue_barks, release_bark, resolve_choice,
+    skip_conversation, sync_progress,
 };
 use crate::dialog_box::{
     ChoiceFocus, animate_box, caret_blink, choice_focus_input, paint_choices, present_dialog_box,
@@ -26,7 +27,7 @@ pub struct DialogInputSet;
 /// Dialog kit plugin. `C` is the marker component of the camera the balloons face — name a marker you
 /// control (see [`track_bubbles`]); the crate never guesses one.
 ///
-/// Registers [`StartConversation`], [`ChoicePicked`], [`ConversationEnded`], [`DialogueNodeEntered`] and [`Bark`], and inserts
+/// Registers [`StartConversation`], [`SkipConversation`], [`ChoicePicked`], [`ConversationEnded`], [`DialogueNodeEntered`] and [`Bark`], and inserts
 /// [`Speakers`], [`DialogueScript`], [`BarkQueue`], [`BarkSettings`], [`DefaultBalloonSkin`], [`BalloonScale`],
 /// [`ChoiceFocus`] and [`Presenter::Balloons`] (insert your own after adding the plugin to override).
 /// The runtime runs in `PreUpdate` ([`DialogInputSet`]) and consumes the presses it uses; the cosmetic
@@ -44,6 +45,7 @@ impl<C: Component> Default for SpeechBubblesPlugin<C> {
 impl<C: Component> Plugin for SpeechBubblesPlugin<C> {
     fn build(&self, app: &mut App) {
         app.add_message::<StartConversation>()
+            .add_message::<SkipConversation>()
             .add_message::<ChoicePicked>()
             .add_message::<ConversationEnded>()
             .add_message::<DialogueNodeEntered>()
@@ -64,6 +66,8 @@ impl<C: Component> Plugin for SpeechBubblesPlugin<C> {
                 PreUpdate,
                 (
                     open_conversation,
+                    // A skip before input, so a press on the same frame meets the node it led to.
+                    skip_conversation,
                     // Input before `resolve_choice`, so a digit or `Enter` pressed this frame
                     // resolves this frame.
                     choice_hotkeys,
@@ -85,6 +89,8 @@ impl<C: Component> Plugin for SpeechBubblesPlugin<C> {
                 Update,
                 (
                     typewriter_tick,
+                    // After the typewriter, so `ConversationProgress::typing` is this frame's.
+                    sync_progress,
                     paint_choices,
                     caret_blink,
                     animate_box,

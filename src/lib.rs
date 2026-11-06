@@ -9,7 +9,9 @@
 //!   draws it without anti-aliasing for pixel-art games.
 //! * **A conversation graph** ([`conversation`]): authored lines and choices ([`DialogueScript`],
 //!   serde-loadable from YAML or RON), a runtime that walks them ([`StartConversation`],
-//!   [`ChoicePicked`], [`ConversationEnded`], [`DialogueNodeEntered`], [`ConversationLock`]), and paced one-off [`Bark`]s.
+//!   [`ChoicePicked`], [`SkipConversation`], [`ConversationEnded`], [`DialogueNodeEntered`],
+//!   [`ConversationLock`], [`ConversationProgress`]), its cost before it starts
+//!   ([`DialogueScript::cost`]), and paced one-off [`Bark`]s.
 //! * **A screen dialog box** ([`dialog_box`]): a Bevy UI surface skinned by the host's [`DialogSkin`],
 //!   with a typewriter, a blinking caret, a name tag, a portrait and clickable, keyboard-navigable
 //!   choices. [`Presenter`] picks balloons or box for conversations; barks are always balloons.
@@ -65,8 +67,9 @@ pub use balloon::{
     RenderedBubble, build_bubble, dwell_secs, expire_bubbles, track_bubbles,
 };
 pub use conversation::{
-    Bark, BarkQueue, BarkSettings, Choice, ChoicePicked, Conversation, ConversationEnded,
-    ConversationLock, DialogueNodeEntered, DialogueScript, Node, Presenter, Speaker, Speakers,
+    Bark, BarkQueue, BarkSettings, Choice, ChoicePicked, Conversation, ConversationCost,
+    ConversationEnded, ConversationLock, ConversationProgress, CostError, DialogueNodeEntered,
+    DialogueScript, Node, Presenter, PressRule, SkipConversation, Speaker, Speakers,
     StartConversation, validate_script,
 };
 pub use dialog_box::{ChoiceFocus, DEFAULT_CHARS_PER_SECOND, DIALOG_Z, DialogSkin};
